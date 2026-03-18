@@ -1,39 +1,82 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Greyhound Form Analyzer", layout="wide")
+# Set page to wide mode for better mobile viewing
+st.set_page_config(page_title="Greyhound Analyzer", layout="wide")
 
-st.title("🐕 Greyhound Multi-Form Analyzer")
-st.markdown("Calculate power ratings based on **Last 3, 5, or 10** runs.")
+st.title("🐕 Greyhound 60/40 Analyzer")
 
+# Step 1: File Upload
 uploaded_file = st.file_uploader("Upload Greyhound CSV", type="csv")
 
 if uploaded_file is not None:
-    # Load data
-    df = pd.read_csv(uploaded_file)
-    
-    # Required columns (Date is now included to ensure we get the 'Latest' runs)
-    required = ['Greyhound_Name', 'Race_Time', 'BON', 'SP', 'Track', 'Distance', 'Date']
-    
-    if all(col in df.columns for col in required):
-        # Ensure Date is actually a datetime object for sorting
-        df['Date'] = pd.to_datetime(df['Date'])
-        df = df.sort_values(by=['Greyhound_Name', 'Date'], ascending=[True, False])
+    try:
+        df = pd.read_csv(uploaded_file)
+        
+        # Standardize column names to remove hidden spaces
+        df.columns = df.columns.str.strip()
+        
+        required = ['Greyhound_Name', 'Race_Time', 'BON', 'SP', 'Track', 'Distance', 'Date']
+        
+        if all(col in df.columns for col in required):
+            # Convert Date safely
+            df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+            df = df.dropna(subset=['Date']) # Remove rows with unreadable dates
+            df = df.sort_values(by=['Greyhound_Name', 'Date'], ascending=[True, False])
 
-        # --- SIDEBAR FILTERS ---
-        st.sidebar.header("Analysis Settings")
-        
-        # 1. Lookback Filter
-        lookback = st.sidebar.selectbox("Form Depth (Last X Runs)", options=[3, 5, 10, "All"], index=0)
-        
-        # 2. Track/Distance Filters
-        selected_tracks = st.sidebar.multiselect("Filter Track", options=df['Track'].unique(), default=df['Track'].unique())
-        selected_dist = st.sidebar.multiselect("Filter Distance", options=df['Distance'].unique(), default=df['Distance'].unique())
-        
-        # 3. Weights (60/40)
-        time_w = st.sidebar.slider("Time-BON Weight (%)", 0, 100, 60)
-        sp_w = 100 - time_w
+            # --- SIDEBAR FILTERS ---
+            st.sidebar.header("Settings")
+            lookback = st.sidebar.selectbox("Last X Runs", options=[3, 5, 10, "All"], index=0)
+            
+            # Filters
+            u_tracks = sorted(df['Track'].unique().tolist())
+            selected_tracks = st.sidebar.multiselect("Tracks", u_tracks, default=u_tracks)
+            
+            u_dist = sorted(df['Distance'].unique().tolist())
+            selected_dist = st.sidebar.multiselect("Distances", u_dist, default=u_dist)
 
+            # Apply Filters
+            mask = (df['Track'].isin(selected_tracks)) & (df['Distance'].isin(selected_dist))
+            f_df = df[mask].copy()
+
+            if not f_df.empty:
+                # 1. Calc Time-BON
+                f_df['Time_Diff'] = f_df['Race_Time'] - f_df['BON']
+
+                # 2. Grab 'Last X' runs per dog
+                if lookback != "All":
+                    f_df = f_df.groupby('Greyhound_Name').head(int(lookback))
+
+                # 3. Aggregate
+                ans = f_df.groupby('Greyhound_Name').agg({
+                    'Time_Diff': 'mean',
+                    'SP': 'mean',
+                    'Date': 'count'
+                }).reset_index()
+                
+                # 4. Scoring (60% Time / 40% SP)
+                # Lower is better for both Time_Diff and SP
+                for col, score_name in [('Time_Diff', 'T_Score'), ('SP', 'S_Score')]:
+                    c_min, c_max = ans[col].min(), ans[col].max()
+                    if c_min != c_max:
+                        ans[score_name] = 1 - (ans[col] - c_min) / (c_max - c_min)
+                    else:
+                        ans[score_name] = 1.0
+
+                ans['Power_Rating'] = (ans['T_Score'] * 0.6) + (ans['S_Score'] * 0.4)
+                
+                # Final Display
+                res = ans[['Greyhound_Name', 'Date', 'Time_Diff', 'SP', 'Power_Rating']]
+                res.columns = ['Greyhound', 'Runs', 'Avg_Diff', 'Avg_SP', 'Rating']
+                
+                st.subheader("Rankings")
+                st.dataframe(res.sort_values('Rating', ascending=False).style.format({'Rating': '{:.1%}'}))
+            else:
+                st.warning("No data matches those filters.")
+        else:
+            st.error(f"CSV missing columns. Needs: {required}")
+    except Exception as e:
+        st.error(f"Error processing file: {e}")
         # --- DATA PROCESSING ---
         # Apply Track/Distance filters first
         mask = (df['Track'].isin(selected_tracks)) & (df['Distance'].isin(selected_dist))
